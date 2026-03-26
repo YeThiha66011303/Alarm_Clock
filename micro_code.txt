@@ -1,0 +1,265 @@
+#include <Wire.h> 
+#include <DS3231.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27,16,2);
+
+RTClib myRTC;
+
+// Rotary Encoder Pins
+const int CLK = 2;
+const int DT = 3;
+const int MODE_BTN = 4;
+const int OK_BTN = 8;
+const int SNOOZE_BTN = 10;  // Snooze Button
+const int DISABLE_BTN = 11;
+const int MIC_PIN = 12;
+const int RELAY_PIN = 5;
+const int BATTERY_PIN = A0;
+
+const bool serial_monitor = false;
+
+// Alarm variables
+int alarmHour = 0, alarmMinute = 0;
+bool alarmSet = false;
+bool settingAlarm = false;
+int settingStep = 0; // 0: Hour, 1: Minute
+int counter = 0;
+int count = 0;
+unsigned long last_run = 0;
+bool alarmTriggered = false;
+
+unsigned long previousMillis = 0; // Stores last time the counter was updated
+const unsigned long oneMinute = 60000; // 1 minute in milliseconds
+
+void setup() {
+  if(serial_monitor){
+  Serial.begin(9600);
+  }
+  Wire.begin();
+
+  lcd.init();                      // initialize the lcd 
+  // Print a message to the LCD.
+  lcd.backlight();
+  lcd.setCursor(0,0);
+  lcd.print("Alarm Clock");
+  lcd.setCursor(0,1);
+  lcd.print("Group 10");
+  delay(1000);
+
+  pinMode(CLK, INPUT);
+  pinMode(DT, INPUT);
+  pinMode(MODE_BTN, INPUT_PULLUP);
+  pinMode(OK_BTN, INPUT_PULLUP);
+  pinMode(SNOOZE_BTN, INPUT_PULLUP);
+  pinMode(DISABLE_BTN, INPUT_PULLUP);
+  pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BATTERY_PIN, INPUT);
+  pinMode(MIC_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(CLK), shaft_moved, FALLING);
+  digitalWrite(RELAY_PIN, HIGH);
+}
+
+void shaft_moved() {
+  if (millis() - last_run > 5 && settingAlarm == true) {
+    if (digitalRead(DT) == HIGH) {
+      counter++;
+    } else {
+      counter--;
+    }
+    last_run = millis();
+  }
+}
+
+void loop() {
+  static bool lastModeBtnState = HIGH;
+  static bool lastOkBtnState = HIGH;
+  static bool lastSnoozeBtnState = HIGH;
+  static bool lastClapSoundState = LOW;
+  static bool lastDisableBtnState = HIGH;
+  static int lastBatteryPercentage = 100;
+
+  bool modeBtnState = digitalRead(MODE_BTN);
+  bool okBtnState = digitalRead(OK_BTN);
+  bool snoozeBtnState = digitalRead(SNOOZE_BTN);
+  bool disableBtnState = digitalRead(DISABLE_BTN);
+  bool clapSoundState = digitalRead(MIC_PIN);
+  int batteryReading = analogRead(BATTERY_PIN);
+
+  int batteryPercentage = map(batteryReading, 615, 860, 0, 100);
+  if(count >= 70){
+    batteryPercentage = batteryPercentage;
+    count = 0;
+  }else{
+    batteryPercentage = lastBatteryPercentage;
+  }
+  // double batteryVoltage = (batteryReading/1024.0)*5.0;
+  
+  if (modeBtnState == LOW && lastModeBtnState == HIGH) {
+    settingAlarm = !settingAlarm;
+    settingStep = 0;
+  }
+  lastModeBtnState = modeBtnState;
+
+  unsigned long currentMillis = millis(); // Get current time
+  if (alarmTriggered == true){
+  if (currentMillis - previousMillis >= oneMinute) { 
+      digitalWrite(LED_BUILTIN, LOW);
+      digitalWrite(RELAY_PIN, HIGH);
+      if(serial_monitor) Serial.println("Alarm Timeout 1 Minute"); // Print message every minute
+      lcd.setCursor(0,0);
+      lcd.print("Alarm Timeout");
+      lcd.setCursor(0,1);
+      lcd.print("1 Minute");
+      delay(1000);
+      alarmTriggered = false;
+  }
+  }
+
+  if (settingAlarm) {
+    setAlarm(okBtnState, lastOkBtnState);
+  } else {
+    if (disableBtnState == LOW && alarmSet){
+      alarmSet = false;
+      if(serial_monitor) Serial.println("Alarm Disabled!");
+      lcd.setCursor(0,0);
+      lcd.print("Alarm Disabled!");
+      lcd.setCursor(0,1);
+      lcd.print("                ");
+      delay(1000);
+      alarmTriggered = false;
+    }
+    displayClock(snoozeBtnState, clapSoundState, lastSnoozeBtnState, batteryPercentage);
+  }
+
+  lastOkBtnState = okBtnState;
+  lastSnoozeBtnState = snoozeBtnState;
+  lastDisableBtnState = disableBtnState;
+  lastBatteryPercentage = batteryPercentage;
+  lastClapSoundState = clapSoundState;
+}
+
+void setAlarm(bool okBtnState, bool &lastOkBtnState) {
+  if (settingStep == 0) {
+    alarmHour = (counter + 24) % 24;
+  } else if (settingStep == 1) {
+    alarmMinute = (counter + 60) % 60;
+  }
+
+  String alarm_time = "Set Alarm: " + String(alarmHour < 10 ? "0" : "") + String(alarmHour) + ":" + String(alarmMinute < 10 ? "0" : "") + String(alarmMinute);
+  if(serial_monitor) Serial.println(alarm_time);
+  lcd.setCursor(0,0);
+  lcd.print(alarm_time);
+  lcd.setCursor(0,1);
+  lcd.print("                ");
+
+  if (okBtnState == LOW && lastOkBtnState == HIGH) {
+    settingStep++;
+    if (settingStep > 1) {
+      alarmSet = true;
+      settingAlarm = false;
+      alarmTriggered = false;
+      if(serial_monitor) Serial.println("Alarm Set!");
+    }
+  }
+}
+
+void displayClock(bool snoozeBtnState, bool clapSoundState, bool &lastSnoozeBtnState, int &batteryPercentage) {
+  DateTime now = myRTC.now();
+  String dateStr = String(now.year()) + "/" + (now.month() < 10 ? "0" : "") + String(now.month()) + "/" + (now.day() < 10 ? "0" : "") + String(now.day());
+  if(serial_monitor) Serial.print(dateStr);
+
+  lcd.setCursor(0,0);
+  lcd.print(dateStr);
+
+  if(serial_monitor) Serial.print("\t");
+  if(serial_monitor) Serial.print("ALARM: ");
+
+  if (alarmSet){
+  if(serial_monitor) Serial.println("ON");
+  lcd.setCursor(10,0);
+  lcd.print("  ON  ");
+  } 
+  else if (alarmTriggered){
+  if(serial_monitor) Serial.println("Triggering");
+  lcd.setCursor(10,0);
+  lcd.print("  Trig ");
+  } 
+  else{
+  if(serial_monitor) Serial.println("OFF");
+  lcd.setCursor(10,0);
+  lcd.print("  OFF ");
+  } 
+
+  // Display the date
+  //Serial.print("Date: ");
+  String timeStr = (now.hour() < 10 ? "0" : "") + String(now.hour()) + ":" + (now.minute() < 10 ? "0" : "") + String(now.minute()) + ":" + (now.second() < 10 ? "0" : "") + String(now.second());
+  if(serial_monitor) Serial.print(timeStr);
+
+  lcd.setCursor(0,1);
+  lcd.print(timeStr);
+
+  if(serial_monitor){
+    Serial.print("\t");
+    Serial.print("Battery: ");
+    Serial.print(batteryPercentage);
+  }
+
+  String battStr = String(batteryPercentage) + "%  ";
+
+  lcd.setCursor(12,1);
+  lcd.print(battStr);
+
+  Serial.println(timeStr);
+  if(serial_monitor) Serial.println();
+
+ if (alarmSet && now.hour() == alarmHour && now.minute() == alarmMinute && !alarmTriggered) {
+  Serial.println("ALARM! Wake up!");
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("ALARM! Wake up!");
+  lcd.setCursor(0,1);
+  lcd.print("                ");
+  
+  alarmSet = false;
+  alarmTriggered = true;
+  
+  for(int i = 0; i < 60; i++) {
+    digitalWrite(LED_BUILTIN, HIGH);
+    digitalWrite(RELAY_PIN, LOW);
+    delay(100);
+    digitalWrite(RELAY_PIN, HIGH);
+    delay(100);
+    digitalWrite(RELAY_PIN, LOW);
+    delay(100);
+    digitalWrite(RELAY_PIN, HIGH);
+    delay(700);
+    
+    
+    if (digitalRead(SNOOZE_BTN) == LOW || digitalRead(MIC_PIN) == HIGH) {
+    if(serial_monitor) Serial.println("Snooze activated!");
+    lcd.setCursor(0,0);
+    lcd.print("Snooze activated!");
+    lcd.setCursor(0,1);
+    lcd.print("                ");
+    delay(2000);
+
+    alarmMinute = (alarmMinute + 5) % 60;
+    if (alarmMinute < 5) {
+        alarmHour = (alarmHour + 1) % 24;
+    }
+    alarmSet = true;
+    alarmTriggered = false;
+    digitalWrite(LED_BUILTIN, LOW);
+    digitalWrite(RELAY_PIN, HIGH);
+    break;  // Exit the loop
+    }
+    alarmTriggered = false;
+  }
+  
+  previousMillis = millis();
+}
+  count++;
+}
